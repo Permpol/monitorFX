@@ -583,6 +583,64 @@
 
   .hour-summary span { color: var(--text); font-weight: 600; }
 
+
+  /* DATE FILTER */
+  .date-filter-wrap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px 14px;
+    flex-wrap: wrap;
+  }
+  .date-filter-wrap label {
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 1px;
+  }
+  .filter-select {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    padding: 4px 8px;
+    cursor: pointer;
+    outline: none;
+    min-width: 140px;
+  }
+  .filter-select:focus { border-color: var(--accent); }
+  .filter-mode-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    padding: 4px 10px;
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: all 0.2s;
+  }
+  .filter-mode-btn.active {
+    background: rgba(0,212,255,0.1);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .filter-badge {
+    font-size: 10px;
+    color: var(--accent);
+    background: rgba(0,212,255,0.08);
+    border: 1px solid rgba(0,212,255,0.2);
+    border-radius: 20px;
+    padding: 3px 10px;
+    letter-spacing: 1px;
+    white-space: nowrap;
+  }
+
   /* SCROLLBAR */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: var(--bg); }
@@ -638,6 +696,18 @@
   <!-- PROGRESS -->
   <div class="progress-wrap">
     <div class="progress-bar" id="progress-bar" style="width:100%"></div>
+  </div>
+
+
+  <!-- DATE FILTER -->
+  <div class="date-filter-wrap" style="margin-bottom:20px">
+    <label>FILTER</label>
+    <button class="filter-mode-btn active" id="btn-mode-day" onclick="setFilterMode('day')">DAY</button>
+    <button class="filter-mode-btn" id="btn-mode-month" onclick="setFilterMode('month')">MONTH</button>
+    <select class="filter-select" id="date-filter-select" onchange="onFilterChange()">
+      <option value="">กำลังโหลด...</option>
+    </select>
+    <span class="filter-badge" id="filter-badge">วันนี้</span>
   </div>
 
   <!-- SUMMARY -->
@@ -702,11 +772,11 @@
 </div>
 
 <script>
-const API_DIRECT = "https://allie-capacitive-kaiden.ngrok-free.app/ea/status/pairs/M_6_INVERT3_Enhanced_Real1?symbol=xauusdm&limit=100";
+const API_DIRECT = "https://allie-capacitive-kaiden.ngrok-free.app/ea/status/pairs/M_6_INVERT3_Enhanced_Real1?symbol=xauusdm&limit=500";
 const isLocalProxy = ['localhost','127.0.0.1'].includes(window.location.hostname);
 // When on localhost → use python proxy (/api/ route) which fetches server-side (no CORS)
 // When not on localhost → try direct + public proxies
-const API_LOCAL  = window.location.origin + "/api/ea/status/pairs/M_6_INVERT3_Enhanced_Real1?symbol=xauusdm&limit=100";
+const API_LOCAL  = window.location.origin + "/api/ea/status/pairs/M_6_INVERT3_Enhanced_Real1?symbol=xauusdm&limit=500";
 let intervalId = null;
 let countdownId = null;
 let secondsLeft = 60;
@@ -773,23 +843,12 @@ function closeReasonBadge(r) {
 
 async function fetchData() {
   setLoadingState();
-  // Build strategies based on environment
+  // Direct fetch — CORS is handled by FastAPI middleware on the server
   const encoded = encodeURIComponent(API_DIRECT);
-  const strategies = isLocalProxy ? [
-    // ★ On localhost: use Python proxy (server-side, no CORS issue at all)
-    () => fetch(API_LOCAL, { headers: { 'accept': 'application/json' } }),
-  ] : [
-    // Direct with ngrok bypass header
+  const strategies = [
     () => fetch(API_DIRECT, {
-      headers: { 'ngrok-skip-browser-warning': '69420', 'accept': 'application/json' },
+      headers: { 'accept': 'application/json', 'ngrok-skip-browser-warning': '69420' },
     }),
-    // allorigins proxy
-    async () => {
-      const r = await fetch(`https://api.allorigins.win/get?url=${encoded}&timestamp=${Date.now()}`);
-      if (!r.ok) throw new Error('allorigins failed');
-      const j = await r.json();
-      return { ok: true, json: () => JSON.parse(j.contents), _proxy: 'allorigins' };
-    },
   ];
 
   for (let i = 0; i < strategies.length; i++) {
@@ -797,6 +856,7 @@ async function fetchData() {
       const res = await strategies[i]();
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
+      buildFilterOptions(json.data || []);
       renderData(json);
       const proxyLabel = res._proxy ? ` (${res._proxy})` : (i > 0 ? ` (proxy ${i})` : '');
       document.getElementById('last-updated').textContent =
@@ -906,28 +966,135 @@ function renderHourPanel(rows) {
     `Worst hour: ${worstStr}`;
 }
 
+// ── Date Filter State ─────────────────────────────
+let _cachedJson = null;
+let _filterMode = 'day';   // 'day' | 'month'
+let _filterValue = '';     // 'YYYY-MM-DD' or 'YYYY-MM'
+
 function getTodayThai() {
   const now = new Date(Date.now() + 7 * 60 * 60 * 1000);
   return { y: now.getUTCFullYear(), m: now.getUTCMonth(), d: now.getUTCDate() };
 }
 
-function isTodayThai(ts) {
-  if (!ts) return false;
+function thaiDateKey(ts, mode) {
+  // returns 'YYYY-MM-DD' or 'YYYY-MM' for a timestamp
+  if (!ts) return '';
   const utcStr = ts.endsWith('Z') ? ts : ts.replace(' ', 'T') + 'Z';
-  const thai = new Date(new Date(utcStr).getTime() + 7 * 60 * 60 * 1000);
-  const today = getTodayThai();
-  return thai.getUTCFullYear() === today.y &&
-         thai.getUTCMonth()    === today.m &&
-         thai.getUTCDate()     === today.d;
+  const d = new Date(new Date(utcStr).getTime() + 7 * 60 * 60 * 1000);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth()+1).padStart(2,'0');
+  const day = String(d.getUTCDate()).padStart(2,'0');
+  return mode === 'month' ? `${y}-${m}` : `${y}-${m}-${day}`;
 }
 
+function buildFilterOptions(data) {
+  // Collect all available day/month keys from closed items
+  const days = new Set();
+  const months = new Set();
+  for (const item of data) {
+    if (item.close && item.close.status === 'close' && item.close.timestamp) {
+      days.add(thaiDateKey(item.close.timestamp, 'day'));
+      months.add(thaiDateKey(item.close.timestamp, 'month'));
+    }
+  }
+
+  const today = getTodayThai();
+  const todayKey = `${today.y}-${String(today.m+1).padStart(2,'0')}-${String(today.d).padStart(2,'0')}`;
+  const thisMonthKey = `${today.y}-${String(today.m+1).padStart(2,'0')}`;
+
+  const sel = document.getElementById('date-filter-select');
+  const mode = _filterMode;
+  const keys = mode === 'month'
+    ? [...months].sort().reverse()
+    : [...days].sort().reverse();
+
+  sel.innerHTML = '';
+  if (keys.length === 0) {
+    sel.innerHTML = '<option value="">ไม่มีข้อมูล</option>';
+    return;
+  }
+
+  for (const k of keys) {
+    const opt = document.createElement('option');
+    opt.value = k;
+    if (mode === 'day') {
+      const [y, mo, d] = k.split('-');
+      const isToday = k === todayKey;
+      opt.textContent = `${d}/${mo}/${y}` + (isToday ? ' (วันนี้)' : '');
+    } else {
+      const [y, mo] = k.split('-');
+      const months_th = ['','ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+      const isThis = k === thisMonthKey;
+      opt.textContent = `${months_th[parseInt(mo)]} ${y}` + (isThis ? ' (เดือนนี้)' : '');
+    }
+    sel.appendChild(opt);
+  }
+
+  // Auto-select today/thisMonth if available, else first
+  const defaultKey = mode === 'month' ? thisMonthKey : todayKey;
+  if (keys.includes(defaultKey)) {
+    sel.value = defaultKey;
+    _filterValue = defaultKey;
+  } else {
+    sel.value = keys[0];
+    _filterValue = keys[0];
+  }
+  updateFilterBadge();
+}
+
+function setFilterMode(mode) {
+  _filterMode = mode;
+  document.getElementById('btn-mode-day').classList.toggle('active', mode === 'day');
+  document.getElementById('btn-mode-month').classList.toggle('active', mode === 'month');
+  if (_cachedJson) {
+    buildFilterOptions(_cachedJson.data || []);
+    renderData(_cachedJson);
+  }
+}
+
+function onFilterChange() {
+  _filterValue = document.getElementById('date-filter-select').value;
+  updateFilterBadge();
+  if (_cachedJson) renderData(_cachedJson);
+}
+
+function updateFilterBadge() {
+  const badge = document.getElementById('filter-badge');
+  const v = _filterValue;
+  if (!v) { badge.textContent = '—'; return; }
+  const today = getTodayThai();
+  const todayKey = `${today.y}-${String(today.m+1).padStart(2,'0')}-${String(today.d).padStart(2,'0')}`;
+  const thisMonthKey = `${today.y}-${String(today.m+1).padStart(2,'0')}`;
+  if (_filterMode === 'day') {
+    const [y, mo, d] = v.split('-');
+    badge.textContent = v === todayKey ? `วันนี้ ${d}/${mo}/${y}` : `${d}/${mo}/${y}`;
+  } else {
+    const [y, mo] = v.split('-');
+    const months_th = ['','ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+    badge.textContent = v === thisMonthKey ? `เดือนนี้ ${months_th[parseInt(mo)]} ${y}` : `${months_th[parseInt(mo)]} ${y}`;
+  }
+}
+
+function isInFilter(ts) {
+  if (!ts || !_filterValue) return false;
+  return thaiDateKey(ts, _filterMode) === _filterValue;
+}
+// ──────────────────────────────────────────────────
+
 function renderData(json) {
+  _cachedJson = json;
   const data = json.data || [];
 
-  // Filter: close status + TODAY (Thai time UTC+7) + unique tickets
+  // Build filter options on first load
+  if (document.getElementById('date-filter-select').options.length <= 1 ||
+      document.getElementById('date-filter-select').options[0].value === '') {
+    buildFilterOptions(data);
+  }
+
+  // Filter: close status + selected date/month (Thai time) + unique tickets
   const ticketMap = new Map();
   for (const item of data) {
-    if (item.close && item.close.status === 'close' && isTodayThai(item.close.timestamp)) {
+    if (item.close && item.close.status === 'close' && isInFilter(item.close.timestamp)) {
       const tk = item.ticket;
       const existing = ticketMap.get(tk);
       if (!existing || new Date(item.close.timestamp) >= new Date(existing.close.timestamp)) {
@@ -972,9 +1139,7 @@ function renderData(json) {
 
   const wr = rows.length > 0 ? ((wins / rows.length) * 100).toFixed(1) : 0;
   document.getElementById('s-winrate').textContent = wr + '%';
-  const td = getTodayThai();
-  const pad2 = n => String(n).padStart(2,'0');
-  document.getElementById('record-count').textContent = rows.length + ' records · วันนี้ ' + pad2(td.d) + '/' + pad2(td.m+1) + '/' + td.y;
+  document.getElementById('record-count').textContent = rows.length + ' records · ' + (document.getElementById('filter-badge').textContent || _filterValue);
 
   if (json.ea_name) document.getElementById('ea-name').textContent = json.ea_name + ' · ' + (json.symbol_filter || '').toUpperCase();
 
@@ -1006,12 +1171,7 @@ function renderData(json) {
 
   // Table
   if (rows.length === 0) {
-    const todayLabel = (() => {
-      const t = getTodayThai();
-      const pad = n => String(n).padStart(2,'0');
-      return `${pad(t.d)}/${pad(t.m+1)}/${t.y}`;
-    })();
-    document.getElementById('table-body').innerHTML = `<tr><td colspan="12"><div class="state-box"><div class="state-text">ไม่มีรายการปิดในวันนี้ (${todayLabel} เวลาไทย)</div></div></td></tr>`;
+    document.getElementById('table-body').innerHTML = `<tr><td colspan="12"><div class="state-box"><div class="state-text">ไม่มีรายการปิดสำหรับ: ${document.getElementById('filter-badge').textContent || _filterValue}</div></div></td></tr>`;
     return;
   }
 
