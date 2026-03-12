@@ -772,11 +772,11 @@
 </div>
 
 <script>
-const API_DIRECT = "https://untradable-crumbly-fidel.ngrok-free.dev/ea/status/pairs/M_6_INVERT3_Enhanced_T1?symbol=xauusdm&limit=200";
+const API_DIRECT = "http://eleceasy.thddns.net:8119/ea/status/pairs/M_6_INVERT3_Enhanced_Real1?symbol=xauusdm&limit=200";
 const isLocalProxy = ['localhost','127.0.0.1'].includes(window.location.hostname);
 // When on localhost → use python proxy (/api/ route) which fetches server-side (no CORS)
 // When not on localhost → try direct + public proxies
-const API_LOCAL  = window.location.origin + "/api/ea/status/pairs/M_6_INVERT3_Enhanced_T1?symbol=xauusdm&limit=200";
+const API_LOCAL  = window.location.origin + "/api/ea/status/pairs/M_6_INVERT3_Enhanced_Real1?symbol=xauusdm&limit=200";
 let intervalId = null;
 let countdownId = null;
 let secondsLeft = 60;
